@@ -1,0 +1,45 @@
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.suo
+*.user
+*.userossc
+*.sln.docstates
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Training outputs and experiment artifacts
+runs/
+
+# Dataset and large local assets
+DATASET/
+camera_volume/*.ply
+
+# Model weights and large binaries
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Jupyter
+.ipynb_checkpoints/
