@@ -9,7 +9,7 @@
 已完成或已有雏形：
 
 - 煤块/矸石/目标物体数据集配置，数据格式为 YOLO 标注格式
-- YOLO 训练脚本，支持增强参数配置与训练指标摘要生成
+- YOLO 在线推理入口，支持视频/摄像头/RTSP 输入，并按 TCP + NDJSON 输出给上位机
 - 单张图像预测脚本
 - D435i 深度相机采集、点云生成、底面拟合、物体点云分割和体积估算实验脚本
 - 视觉端到上位机的 TCP + NDJSON 接口契约文档
@@ -18,7 +18,7 @@
 
 仍待完善：
 
-- YOLO 在线推理、深度体积估算、重力传感器质量读取之间的完整流水线
+- 重力传感器质量读取与低置信度目标的密度复核策略
 - 低置信度目标的密度复核策略与阈值配置
 - 传送带坐标系、相机外参标定和实际机械分选闭环
 - 上位机与机械臂、相机、重力传感器之间的实际通信适配与联调
@@ -90,7 +90,7 @@ D435i 深度图 + bbox/ROI
 
 ```text
 .
-├── main.py                         # YOLO 训练入口，训练后生成指标摘要
+├── main.py                         # 视觉端在线入口：视频输入、YOLO 推理、D435i 体积估算、TCP 输出
 ├── test.py                         # 单图预测示例
 ├── tech-document.md                # 视觉端与上位机接口契约 v1.1
 ├── yolo26n.pt                      # YOLO26n 初始/基础权重
@@ -102,7 +102,7 @@ D435i 深度图 + bbox/ROI
 ├── camera_volume/
 │   ├── test_volum.py               # D435i 点云体积估算实验
 │   ├── vision_ply.py               # PLY 点云查看示例
-│   └── *.ply                       # 实验采集的点云文件
+│   └── *.ply                       # 运行 test_volum.py 后生成的本地点云文件，默认不纳入版本管理
 └── runs/
     ├── coal_v1/                    # YOLOv8s 训练结果
     ├── coal_v1_mixup015_26n/       # YOLO26n + mixup 训练结果
@@ -149,7 +149,7 @@ D435i 深度图 + bbox/ROI
 基础训练/推理：
 
 ```bash
-pip install ultralytics opencv-python numpy
+pip install ultralytics opencv-python numpy PyYAML
 ```
 
 D435i 体积估算实验：
@@ -162,32 +162,65 @@ pip install open3d pyrealsense2
 
 ## 使用方法
 
-### 1. 训练检测模型
+### 1. 在线推理并输出给上位机
 
-训练配置集中在 `main.py` 的 `TRAIN_ARGS` 中，默认使用：
+`main.py` 是当前视觉端在线入口，启动后会：
 
-- model: `yolo26n.pt`
-- data: `DATASET/data.yaml`
-- epochs: `100`
-- imgsz: `640`
-- batch: `16`
-- output: `runs/coal_yolo26n_aug`
+1. 加载 `runs/coal_v1/weights/best.pt`
+2. 通过 OpenCV `VideoCapture` 读取视频输入
+3. 对每帧执行 YOLO 推理
+4. 对低置信度目标尝试调用 D435i 生成 ROI 点云并估算体积
+5. 按 `tech-document.md` 的 `VisionResult v1.1` 通过 TCP + NDJSON 发给上位机
 
-运行：
+视频输入接口由 `--source` 指定：
+
+| 输入类型 | 示例 | 说明 |
+|---|---|---|
+| 本机摄像头 | `--source 0` | 使用 OpenCV 摄像头编号 |
+| 本地视频文件 | `--source D:\video\input.mp4` | 读取录制视频 |
+| 网络视频流 | `--source rtsp://192.168.1.10/live` | 读取 RTSP/HTTP 流 |
+
+基础烟测，不启用 D435i：
 
 ```bash
-python main.py
+python main.py --source 0 --no-depth --max-frames 10 --jsonl vision_output.jsonl
 ```
 
-训练结束后会输出关键指标，并生成：
+联调上位机，监听默认 `9001` 端口：
 
-```text
-runs/coal_yolo26n_aug/metrics_summary.md
+```bash
+python main.py --source 0 --host 0.0.0.0 --port 9001
 ```
+
+使用视频文件并开启本地预览：
+
+```bash
+python main.py --source D:\video\input.mp4 --show
+```
+
+使用 D435i 低置信度体积估算：
+
+```bash
+python main.py --source 0 --low-conf-threshold 0.70 --calibrate-empty-plane
+```
+
+注意：`tech-document.md v1.1` 没有定义 `volume` 字段，因此低置信度目标的体积估算结果只写入视觉端日志，不会作为额外字段发送给上位机。现场完成标定前，`main.py` 中的相机到皮带外参、像素到皮带坐标映射和底面平面使用虚拟参数占位，代码注释中已标明。
+
+常用参数：
+
+| 参数 | 默认值 | 作用 |
+|---|---:|---|
+| `--conf` | `0.25` | YOLO 检测置信度阈值 |
+| `--low-conf-threshold` | `0.70` | 低于该值时触发体积估算 |
+| `--imgsz` | 读取 `runs/coal_v1/args.yaml` | YOLO 推理尺寸 |
+| `--iou` | 读取 `runs/coal_v1/args.yaml` | NMS IoU 阈值 |
+| `--belt-speed` | `180.0` | 输出给上位机的皮带速度，单位 mm/s |
+| `--calibration` | `config/calibration.yaml` | 相机到皮带坐标系外参文件 |
+| `--jsonl` | 无 | 本地保存一份协议输出，便于自测 |
 
 ### 2. 单图预测
 
-`test.py` 当前使用 `runs/coal_v1/weights/best.pt` 对一张训练集图片进行预测，结果保存到 `runs/predict_v1`。
+`test.py` 是单图预测示例。脚本内配置了权重路径、输入图片路径和输出目录，使用前请确认图片文件存在，并按需要修改 `MODEL_WEIGHTS`、`SOURCE_IMAGE` 和 `OUTPUT_NAME`。
 
 ```bash
 python test.py
@@ -220,9 +253,9 @@ python test_volum.py
 脚本会生成：
 
 ```text
-empty_plane_cloud.ply
-scene_with_object_cloud.ply
-object_only_cloud.ply
+camera_volume/empty_plane_cloud.ply
+camera_volume/scene_with_object_cloud.ply
+camera_volume/object_only_cloud.ply
 ```
 
 并输出估算体积，单位包括 `m^3`、`cm^3` 和 `L`。
@@ -237,6 +270,7 @@ object_only_cloud.ply
 - 默认端口：`9001`
 - 坐标输出：皮带坐标系下的 3D 点，单位 mm
 - 深度相机：Intel RealSense D435i
+- 严格字段校验：不要在 JSON 中新增协议未定义字段
 
 典型输出对象包含：
 
